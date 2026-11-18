@@ -1,0 +1,71 @@
+#!/bin/bash
+set -Eeuo pipefail
+umask 022
+
+fail() {
+    printf '%s\n' "Cuecard: $*" >&2
+    exit 1
+}
+
+if [ "$(/usr/bin/uname -s)" != Darwin ]; then
+    fail "This installer runs on macOS."
+fi
+major="$(/usr/bin/sw_vers -productVersion | /usr/bin/cut -d. -f1)"
+[ "$major" -ge 13 ] || fail "Cuecard requires macOS 13 or later."
+
+case "${1:-}" in
+    ""|--no-launch) ;;
+    *) fail "Usage: $0 [--no-launch]" ;;
+esac
+[ "$#" -le 1 ] || fail "Usage: $0 [--no-launch]"
+
+embedded_bundle() {
+    /usr/bin/base64 -D <<'CUECARD_APP_DATA'
+@BUNDLE_PAYLOAD@
+CUECARD_APP_DATA
+}
+
+applications="$HOME/Applications"
+destination="$applications/Cuecard.app"
+bundle_id="app.rocieval.cuecard"
+/bin/mkdir -p "$applications"
+stage="$(/usr/bin/mktemp -d "$applications/.cuecard.install.XXXXXX")"
+backup="$stage/previous.app"
+replacement="$stage/Cuecard.app"
+cleanup() {
+    if [ -d "$backup" ] && [ ! -e "$destination" ]; then
+        /bin/mv "$backup" "$destination" || return
+    fi
+    /bin/rm -rf "$stage"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'printf "Installation failed on line %s.\n" "$LINENO" >&2' ERR
+
+echo "Installing Cuecard…"
+embedded_bundle > "$stage/Cuecard.zip"
+/usr/bin/ditto -x -k "$stage/Cuecard.zip" "$stage"
+/usr/bin/codesign --verify --strict "$replacement"
+app_id() {
+    /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$1/Contents/Info.plist" 2>/dev/null
+}
+[ "$(app_id "$replacement")" = "$bundle_id" ] || fail "The bundled app has an unexpected identifier."
+
+if [ -e "$destination" ] || [ -L "$destination" ]; then
+    if [ -L "$destination" ] || [ "$(app_id "$destination" || true)" != "$bundle_id" ]; then
+        fail "Another item occupies $destination. Move it before installing."
+    fi
+    # Avoid replacing the executable of a running installation.
+    if /bin/ps -ax -o comm= 2>/dev/null | /usr/bin/grep -Fx "$destination/Contents/MacOS/Cuecard" >/dev/null; then
+        fail "Quit Cuecard from its ⋯ menu (Scripts in version 1.0), then run this installer again."
+    fi
+    /bin/mv "$destination" "$backup"
+fi
+
+/bin/mv "$replacement" "$destination"
+echo "Installed $destination"
+if [ "${1:-}" != --no-launch ]; then
+    /usr/bin/open "$destination"
+    echo "Click the lined icon in your menu bar to open Cuecard."
+fi
